@@ -55,6 +55,15 @@
 * property whatsoever. Maxim Integrated Products, Inc. retains all
 * ownership rights.
 *******************************************************************************
+*  Modified original MAXIM source code on: 13.01.2019
+*		Author: Mateusz Salamon
+*		www.msalamon.pl
+*		mateusz@msalamon.pl
+*	Code is modified to work with STM32 HAL libraries.
+*
+*	Website: https://msalamon.pl/palec-mi-pulsuje-pulsometr-max30102-pod-kontrola-stm32/
+*	GitHub:  https://github.com/lamik/MAX30102_STM32_HAL
+*
 */
 #include "main.h"
 #include <MAX30102/algorithm.h>
@@ -75,8 +84,7 @@ static int32_t an_dx[ BUFFER_SIZE-MA4_SIZE]; // delta
 static int32_t an_x[ BUFFER_SIZE]; //ir
 static int32_t an_y[ BUFFER_SIZE]; //red
 
-void maxim_heart_rate_and_oxygen_saturation(uint32_t *pun_ir_buffer,  int32_t n_ir_buffer_length, uint32_t *pun_red_buffer, int32_t *pn_spo2, int8_t *pch_spo2_valid, 
-                              int32_t *pn_heart_rate, int8_t  *pch_hr_valid)
+void maxim_heart_rate_and_oxygen_saturation(volatile uint32_t *pun_ir_buffer, volatile uint32_t *pun_red_buffer, int32_t n_buffer_length, uint16_t un_offset, int32_t *pn_spo2, int8_t *pch_spo2_valid, int32_t *pn_heart_rate, int8_t  *pch_hr_valid)
 /**
 * \brief        Calculate the heart rate and SpO2 level
 * \par          Details
@@ -85,7 +93,7 @@ void maxim_heart_rate_and_oxygen_saturation(uint32_t *pun_ir_buffer,  int32_t n_
 *               Thus, accurate SPO2 is precalculated and save longo uch_spo2_table[] per each ratio.
 *
 * \param[in]    *pun_ir_buffer           - IR sensor data buffer
-* \param[in]    n_ir_buffer_length      - IR sensor data buffer length
+* \param[in]    n_buffer_length      - IR sensor data buffer length
 * \param[in]    *pun_red_buffer          - Red sensor data buffer
 * \param[out]    *pn_spo2                - Calculated SpO2 value
 * \param[out]    *pch_spo2_valid         - 1 if the calculated SpO2 value is valid
@@ -110,14 +118,26 @@ void maxim_heart_rate_and_oxygen_saturation(uint32_t *pun_ir_buffer,  int32_t n_
     int32_t n_y_dc_max_idx, n_x_dc_max_idx; 
     int32_t an_ratio[5],n_ratio_average; 
     int32_t n_nume,  n_denom ;
+    uint32_t un_offset_tmp = un_offset;
     // remove DC of ir signal    
     un_ir_mean =0; 
-    for (k=0 ; k<n_ir_buffer_length ; k++ ) un_ir_mean += pun_ir_buffer[k] ;
-    un_ir_mean =un_ir_mean/n_ir_buffer_length ;
-    for (k=0 ; k<n_ir_buffer_length ; k++ )  an_x[k] =  pun_ir_buffer[k] - un_ir_mean ; 
+    for (k=0 ; k<n_buffer_length ; k++ )
+	{
+    	un_ir_mean += pun_ir_buffer[un_offset_tmp];
+    	un_offset_tmp = (un_offset_tmp + 1) % MAX30102_BUFFER_LENGTH;
+	}
+
+    un_ir_mean =un_ir_mean/n_buffer_length ;
+    un_offset_tmp = un_offset;
+    for (k=0 ; k<n_buffer_length ; k++ )
+	{
+    	an_x[k] =  pun_ir_buffer[un_offset_tmp] - un_ir_mean;
+    	un_offset_tmp = (un_offset_tmp + 1) % MAX30102_BUFFER_LENGTH;
+	}
     
     // 4 pt Moving Average
-    for(k=0; k< BUFFER_SIZE-MA4_SIZE; k++){
+    for(k=0; k< BUFFER_SIZE-MA4_SIZE; k++)
+    {
         n_denom= ( an_x[k]+an_x[k+1]+ an_x[k+2]+ an_x[k+3]);
         an_x[k]=  n_denom/(int32_t)4; 
     }
@@ -156,7 +176,7 @@ void maxim_heart_rate_and_oxygen_saturation(uint32_t *pun_ir_buffer,  int32_t n_
         for (k=1; k<n_npks; k++)
             n_peak_interval_sum += (an_dx_peak_locs[k]-an_dx_peak_locs[k -1]);
         n_peak_interval_sum=n_peak_interval_sum/(n_npks-1);
-        *pn_heart_rate=(int32_t)(6000/n_peak_interval_sum);// beats per minutes
+        *pn_heart_rate=(int32_t)(6000/(float)n_peak_interval_sum*(float)(FS/100.0));// beats per minutes
         *pch_hr_valid  = 1;
     }
     else  {
@@ -169,10 +189,12 @@ void maxim_heart_rate_and_oxygen_saturation(uint32_t *pun_ir_buffer,  int32_t n_
 
 
     // raw value : RED(=y) and IR(=X)
-    // we need to assess DC and AC value of ir and red PPG. 
-    for (k=0 ; k<n_ir_buffer_length ; k++ )  {
-        an_x[k] =  pun_ir_buffer[k] ; 
-        an_y[k] =  pun_red_buffer[k] ; 
+    // we need to assess DC and AC value of ir and red PPG.
+    un_offset_tmp = un_offset;
+    for (k=0 ; k<n_buffer_length ; k++ )  {
+        an_x[k] =  pun_ir_buffer[un_offset_tmp];
+        an_y[k] =  pun_red_buffer[un_offset_tmp];
+        un_offset_tmp = (un_offset_tmp + 1) % MAX30102_BUFFER_LENGTH;
     }
 
     // find precise min near an_ir_valley_locs

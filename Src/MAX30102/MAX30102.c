@@ -61,27 +61,51 @@
 *		mateusz@msalamon.pl
 *	Code is modified to work with STM32 HAL libraries.
 *
-*	BLOG
-*	GITHUB
+*	Website: https://msalamon.pl/palec-mi-pulsuje-pulsometr-max30102-pod-kontrola-stm32/
+*	GitHub:  https://github.com/lamik/MAX30102_STM32_HAL
 *
 */
 #include "main.h"
 #include "i2c.h"
 
 #include "MAX30102/MAX30102.h"
+#include "MAX30102/algorithm.h"
+
+#define I2C_TIMEOUT	1
 
 I2C_HandleTypeDef *i2c_max30102;
 
+volatile uint32_t IrBuffer[MAX30102_BUFFER_LENGTH]; //IR LED sensor data
+volatile uint32_t RedBuffer[MAX30102_BUFFER_LENGTH];    //Red LED sensor data
+volatile uint32_t BufferHead;
+volatile uint32_t BufferTail;
+volatile uint32_t CollectedSamples;
+volatile uint8_t IsFingerOnScreen;
+int32_t Sp02Value;
+int8_t Sp02IsValid;
+int32_t HeartRate;
+int8_t IsHrValid;
+
+typedef enum
+{
+	MAX30102_STATE_BEGIN,
+	MAX30102_STATE_CALIBRATE,
+	MAX30102_STATE_CALCULATE_HR,
+	MAX30102_STATE_COLLECT_NEXT_PORTION
+}MAX30102_STATE;
+
+MAX30102_STATE StateMachine;
+
 MAX30102_STATUS Max30102_WriteReg(uint8_t uch_addr, uint8_t uch_data)
 {
-	if(HAL_I2C_Mem_Write(i2c_max30102, MAX30102_ADDRESS, uch_addr, 1, &uch_data, 1, 10) == HAL_OK)
+	if(HAL_I2C_Mem_Write(i2c_max30102, MAX30102_ADDRESS, uch_addr, 1, &uch_data, 1, I2C_TIMEOUT) == HAL_OK)
 		return MAX30102_OK;
 	return MAX30102_ERROR;
 }
 
 MAX30102_STATUS Max30102_ReadReg(uint8_t uch_addr, uint8_t *puch_data)
 {
-	if(HAL_I2C_Mem_Read(i2c_max30102, MAX30102_ADDRESS, uch_addr, 1, puch_data, 1, 10) == HAL_OK)
+	if(HAL_I2C_Mem_Read(i2c_max30102, MAX30102_ADDRESS, uch_addr, 1, puch_data, 1, I2C_TIMEOUT) == HAL_OK)
 		return MAX30102_OK;
 	return MAX30102_ERROR;
 }
@@ -99,14 +123,14 @@ MAX30102_STATUS Max30102_WriteRegisterBit(uint8_t Register, uint8_t Bit, uint8_t
 	return MAX30102_OK;
 }
 
-MAX30102_STATUS Max30102_ReadFifo(uint32_t *pun_red_led, uint32_t *pun_ir_led)
+MAX30102_STATUS Max30102_ReadFifo(volatile uint32_t *pun_red_led, volatile uint32_t *pun_ir_led)
 {
 	uint32_t un_temp;
 	*pun_red_led=0;
 	*pun_ir_led=0;
 	uint8_t ach_i2c_data[6];
 
-	if(HAL_I2C_Mem_Read(i2c_max30102, MAX30102_ADDRESS, REG_FIFO_DATA, 1, ach_i2c_data, 6, 10) != HAL_OK)
+	if(HAL_I2C_Mem_Read(i2c_max30102, MAX30102_ADDRESS, REG_FIFO_DATA, 1, ach_i2c_data, 6, I2C_TIMEOUT) != HAL_OK)
 	{
 		return MAX30102_ERROR;
 	}
@@ -130,7 +154,6 @@ MAX30102_STATUS Max30102_ReadFifo(uint32_t *pun_red_led, uint32_t *pun_ir_led)
 	*pun_red_led&=0x03FFFF;  //Mask MSB [23:18]
 	*pun_ir_led&=0x03FFFF;  //Mask MSB [23:18]
 
-
 	return MAX30102_OK;
 }
 
@@ -153,13 +176,13 @@ MAX30102_STATUS Max30102_SetIntAmbientLightCancelationOvfEnabled(uint8_t Enable)
 
 	return Max30102_WriteRegisterBit(REG_INTR_ENABLE_2, INT_ALC_OVF_BIT, Enable);
 }
-
+#ifdef MAX30102_USE_INTERNAL_TEMPERATURE
 MAX30102_STATUS Max30102_SetIntInternalTemperatureReadyEnabled(uint8_t Enable)
 {
 
 	return Max30102_WriteRegisterBit(REG_INTR_ENABLE_2, INT_DIE_TEMP_RDY_BIT, Enable);
 }
-
+#endif
 MAX30102_STATUS Max30102_ReadInterruptStatus(uint8_t *Status)
 {
 	uint8_t tmp;
@@ -168,28 +191,52 @@ MAX30102_STATUS Max30102_ReadInterruptStatus(uint8_t *Status)
 	if(MAX30102_OK != Max30102_ReadReg(REG_INTR_STATUS_1, &tmp))
 		return MAX30102_ERROR;
 	*Status |= tmp & 0xE1; // 3 highest bits
-
+#ifdef MAX30102_USE_INTERNAL_TEMPERATURE
 	if(MAX30102_OK != Max30102_ReadReg(REG_INTR_STATUS_2, &tmp))
 		return MAX30102_ERROR;
 	*Status |= tmp & 0x02;
+#endif
 	return MAX30102_OK;
 }
 
 void Max30102_InterruptCallback(void)
 {
 	uint8_t Status;
-	Max30102_ReadInterruptStatus(&Status);
+	while(MAX30102_OK != Max30102_ReadInterruptStatus(&Status));
 
 	// Almost Full FIFO Interrupt handle
 	if(Status & (1<<INT_A_FULL_BIT))
 	{
-
+		for(uint8_t i = 0; i < MAX30102_FIFO_ALMOST_FULL_SAMPLES; i++)
+		{
+			while(MAX30102_OK != Max30102_ReadFifo((RedBuffer+BufferHead), (IrBuffer+BufferHead)));
+			if(IsFingerOnScreen)
+			{
+				if(IrBuffer[BufferHead] < MAX30102_IR_VALUE_FINGER_OUT_SENSOR) IsFingerOnScreen = 0;
+			}
+			else
+			{
+				if(IrBuffer[BufferHead] > MAX30102_IR_VALUE_FINGER_ON_SENSOR) IsFingerOnScreen = 1;
+			}
+			BufferHead = (BufferHead + 1) % MAX30102_BUFFER_LENGTH;
+			CollectedSamples++;
+		}
 	}
 
 	// New FIFO Data Ready Interrupt handle
 	if(Status & (1<<INT_PPG_RDY_BIT))
 	{
-
+		while(MAX30102_OK != Max30102_ReadFifo((RedBuffer+BufferHead), (IrBuffer+BufferHead)));
+		if(IsFingerOnScreen)
+		{
+			if(IrBuffer[BufferHead] < MAX30102_IR_VALUE_FINGER_OUT_SENSOR) IsFingerOnScreen = 0;
+		}
+		else
+		{
+			if(IrBuffer[BufferHead] > MAX30102_IR_VALUE_FINGER_ON_SENSOR) IsFingerOnScreen = 1;
+		}
+		BufferHead = (BufferHead + 1) % MAX30102_BUFFER_LENGTH;
+		CollectedSamples++;
 	}
 
 	//  Ambient Light Cancellation Overflow Interrupt handle
@@ -199,17 +246,16 @@ void Max30102_InterruptCallback(void)
 	}
 
 	// Power Ready Interrupt handle
+	if(Status & (1<<INT_PWR_RDY_BIT))
+	{
+	}
+#ifdef MAX30102_USE_INTERNAL_TEMPERATURE
+	// Internal Temperature Ready Interrupt handle
 	if(Status & (1<<INT_DIE_TEMP_RDY_BIT))
 	{
 
 	}
-
-	// Internal Temperature Ready Interrupt handle
-	if(Status & (1<<INT_PWR_RDY_BIT))
-	{
-
-	}
-
+#endif
 }
 
 //
@@ -364,6 +410,91 @@ MAX30102_STATUS Max30102_Led2PulseAmplitude(uint8_t Value)
 }
 
 //
+//	Usage functions
+//
+MAX30102_STATUS Max30102_IsFingerOnSensor(void)
+{
+	return IsFingerOnScreen;
+}
+
+int32_t Max30102_GetHeartRate(void)
+{
+	return HeartRate;
+}
+
+int32_t Max30102_GetSpO2Value(void)
+{
+	return Sp02Value;
+}
+
+void Max30102_Task(void)
+{
+	switch(StateMachine)
+	{
+		case MAX30102_STATE_BEGIN:
+			HeartRate = 0;
+			Sp02Value = 0;
+			if(IsFingerOnScreen)
+			{
+				CollectedSamples = 0;
+				BufferTail = BufferHead;
+				Max30102_Led1PulseAmplitude(MAX30102_RED_LED_CURRENT_HIGH);
+				Max30102_Led2PulseAmplitude(MAX30102_IR_LED_CURRENT_HIGH);
+				StateMachine = MAX30102_STATE_CALIBRATE;
+			}
+			break;
+
+		case MAX30102_STATE_CALIBRATE:
+				if(IsFingerOnScreen)
+				{
+					if(CollectedSamples > (MAX30102_BUFFER_LENGTH-MAX30102_SAMPLES_PER_SECOND))
+					{
+						StateMachine = MAX30102_STATE_CALCULATE_HR;
+					}
+				}
+				else
+				{
+					Max30102_Led1PulseAmplitude(MAX30102_RED_LED_CURRENT_LOW);
+					Max30102_Led2PulseAmplitude(MAX30102_IR_LED_CURRENT_LOW);
+					StateMachine = MAX30102_STATE_BEGIN;
+				}
+			break;
+
+		case MAX30102_STATE_CALCULATE_HR:
+			if(IsFingerOnScreen)
+			{
+				maxim_heart_rate_and_oxygen_saturation(IrBuffer, RedBuffer, MAX30102_BUFFER_LENGTH-MAX30102_SAMPLES_PER_SECOND, BufferTail, &Sp02Value, &Sp02IsValid, &HeartRate, &IsHrValid);
+				BufferTail = (BufferTail + MAX30102_SAMPLES_PER_SECOND) % MAX30102_BUFFER_LENGTH;
+				CollectedSamples = 0;
+				StateMachine = MAX30102_STATE_COLLECT_NEXT_PORTION;
+			}
+			else
+			{
+				Max30102_Led1PulseAmplitude(MAX30102_RED_LED_CURRENT_LOW);
+				Max30102_Led2PulseAmplitude(MAX30102_IR_LED_CURRENT_LOW);
+				StateMachine = MAX30102_STATE_BEGIN;
+			}
+			break;
+
+		case MAX30102_STATE_COLLECT_NEXT_PORTION:
+			if(IsFingerOnScreen)
+			{
+				if(CollectedSamples > MAX30102_SAMPLES_PER_SECOND)
+				{
+					StateMachine = MAX30102_STATE_CALCULATE_HR;
+				}
+			}
+			else
+			{
+				Max30102_Led1PulseAmplitude(MAX30102_RED_LED_CURRENT_LOW);
+				Max30102_Led2PulseAmplitude(MAX30102_IR_LED_CURRENT_LOW);
+				StateMachine = MAX30102_STATE_BEGIN;
+			}
+			break;
+	}
+}
+
+//
 //	Initialization
 //
 MAX30102_STATUS Max30102_Init(I2C_HandleTypeDef *i2c)
@@ -373,10 +504,6 @@ MAX30102_STATUS Max30102_Init(I2C_HandleTypeDef *i2c)
 	if(MAX30102_OK != Max30102_Reset()) //resets the MAX30102
 		return MAX30102_ERROR;
 	if(MAX30102_OK != Max30102_ReadReg(0,&uch_dummy))
-		return MAX30102_ERROR;
-	if(MAX30102_OK != Max30102_SetIntAlmostFullEnabled(1))
-		return MAX30102_ERROR;
-	if(MAX30102_OK != Max30102_SetIntFifoDataReadyEnabled(1))
 		return MAX30102_ERROR;
 	if(MAX30102_OK != Max30102_FifoWritePointer(0x00))
 		return MAX30102_ERROR;
@@ -388,21 +515,26 @@ MAX30102_STATUS Max30102_Init(I2C_HandleTypeDef *i2c)
 		return MAX30102_ERROR;
 	if(MAX30102_OK != Max30102_FifoRolloverEnable(0))
 		return MAX30102_ERROR;
-	if(MAX30102_OK != Max30102_FifoAlmostFullValue(17))
+	if(MAX30102_OK != Max30102_FifoAlmostFullValue(MAX30102_FIFO_ALMOST_FULL_SAMPLES))
 		return MAX30102_ERROR;
 	if(MAX30102_OK != Max30102_SetMode(MODE_SPO2_MODE))
 		return MAX30102_ERROR;
 	if(MAX30102_OK != Max30102_SpO2AdcRange(SPO2_ADC_RGE_4096))
 		return MAX30102_ERROR;
-	if(MAX30102_OK != Max30102_SpO2SampleRate(SPO2_SAMPLE_RATE_100))
+	if(MAX30102_OK != Max30102_SpO2SampleRate(SPO2_SAMPLE_RATE))
 		return MAX30102_ERROR;
 	if(MAX30102_OK != Max30102_SpO2LedPulseWidth(SPO2_PULSE_WIDTH_411))
 		return MAX30102_ERROR;
-	if(MAX30102_OK != Max30102_Led1PulseAmplitude(0x24))   //Choose value for ~ 7mA for LED1
+	if(MAX30102_OK != Max30102_Led1PulseAmplitude(MAX30102_RED_LED_CURRENT_LOW))
 		return MAX30102_ERROR;
-	if(MAX30102_OK != Max30102_Led2PulseAmplitude(0x24))   // Choose value for ~ 7mA for LED2
+	if(MAX30102_OK != Max30102_Led2PulseAmplitude(MAX30102_IR_LED_CURRENT_LOW))
+		return MAX30102_ERROR;
+	if(MAX30102_OK != Max30102_SetIntAlmostFullEnabled(1))
+		return MAX30102_ERROR;
+	if(MAX30102_OK != Max30102_SetIntFifoDataReadyEnabled(1))
 		return MAX30102_ERROR;
 //	if(MAX30102_OK != Max30102_WriteReg(REG_PILOT_PA,0x7f))   // Choose value for ~ 25mA for Pilot LED
 //		return MAX30102_ERROR;
+	StateMachine = MAX30102_STATE_BEGIN;
 	return MAX30102_OK;
 }

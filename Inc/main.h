@@ -81,8 +81,9 @@ void Error_Handler(void);
 /* Private defines -----------------------------------------------------------*/
 #define TEST_Pin GPIO_PIN_7
 #define TEST_GPIO_Port GPIOC
-#define INT_Pin GPIO_PIN_8
+#define INT_Pin GPIO_PIN_9
 #define INT_GPIO_Port GPIOA
+#define INT_EXTI_IRQn EXTI9_5_IRQn
 /* USER CODE BEGIN Private defines */
 
 /* USER CODE END Private defines */

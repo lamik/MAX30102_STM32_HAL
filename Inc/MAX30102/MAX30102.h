@@ -61,16 +61,31 @@
 *		mateusz@msalamon.pl
 *	Code is modified to work with STM32 HAL libraries.
 *
-*	BLOG
-*	GITHUB
+*	Website: https://msalamon.pl/palec-mi-pulsuje-pulsometr-max30102-pod-kontrola-stm32/
+*	GitHub:  https://github.com/lamik/MAX30102_STM32_HAL
 *
 */
 #ifndef MAX30102_H_
 #define MAX30102_H_
 
-#define MAX30102_ADDRESS 0xAE//(0x57<<1)
+#define MAX30102_ADDRESS 0xAE	//(0x57<<1)
+//#define MAX30102_USE_INTERNAL_TEMPERATURE
 
-#define MAX30102_BUFFER_LENGTH	512
+#define MAX30102_MEASUREMENT_SECONDS 5
+#define MAX30102_SAMPLES_PER_SECOND	100 // 50, 100, 200, 400, 800, 100, 1600, 3200 sample rating
+#define MAX30102_FIFO_ALMOST_FULL_SAMPLES 17
+
+#define MAX30102_BUFFER_LENGTH	((MAX30102_MEASUREMENT_SECONDS+1)*MAX30102_SAMPLES_PER_SECOND)
+
+//
+//	Calibration
+//
+#define MAX30102_IR_LED_CURRENT_LOW		0x01
+#define MAX30102_RED_LED_CURRENT_LOW	0x00
+#define MAX30102_IR_LED_CURRENT_HIGH	0x24
+#define MAX30102_RED_LED_CURRENT_HIGH	0x24
+#define MAX30102_IR_VALUE_FINGER_ON_SENSOR 1600
+#define MAX30102_IR_VALUE_FINGER_OUT_SENSOR 50000
 //
 //	Register addresses
 //
@@ -161,6 +176,26 @@
 #define	SPO2_SAMPLE_RATE_1600	6
 #define	SPO2_SAMPLE_RATE_3200	7
 
+#if(MAX30102_SAMPLES_PER_SECOND == 50)
+#define SPO2_SAMPLE_RATE SPO2_SAMPLE_RATE_50
+#elif((MAX30102_SAMPLES_PER_SECOND == 100))
+#define SPO2_SAMPLE_RATE SPO2_SAMPLE_RATE_100
+#elif((MAX30102_SAMPLES_PER_SECOND == 200))
+#define SPO2_SAMPLE_RATE SPO2_SAMPLE_RATE_200
+#elif((MAX30102_SAMPLES_PER_SECOND == 400))
+#define SPO2_SAMPLE_RATE SPO2_SAMPLE_RATE_400
+#elif((MAX30102_SAMPLES_PER_SECOND == 800))
+#define SPO2_SAMPLE_RATE SPO2_SAMPLE_RATE_800
+#elif((MAX30102_SAMPLES_PER_SECOND == 1000))
+#define SPO2_SAMPLE_RATE SPO2_SAMPLE_RATE_1000
+#elif((MAX30102_SAMPLES_PER_SECOND == 1600))
+#define SPO2_SAMPLE_RATE SPO2_SAMPLE_RATE_1600
+#elif((MAX30102_SAMPLES_PER_SECOND == 3200))
+#define SPO2_SAMPLE_RATE SPO2_SAMPLE_RATE_3200
+#else
+#error "Wrong Sample Rate value. Use 50, 100, 200, 400, 800, 1000, 1600 or 3200."
+#endif
+
 #define	SPO2_PULSE_WIDTH_69			0
 #define	SPO2_PULSE_WIDTH_118		1
 #define	SPO2_PULSE_WIDTH_215		2
@@ -170,15 +205,15 @@
 //	Status enum
 //
 typedef enum{
-	MAX30102_OK 	= 0,
-	MAX30102_ERROR 	= 1
+	MAX30102_ERROR 	= 0,
+	MAX30102_OK 	= 1
 } MAX30102_STATUS;
 
 //
 //	Functions
 //
 MAX30102_STATUS Max30102_Init(I2C_HandleTypeDef *i2c);
-MAX30102_STATUS Max30102_ReadFifo(uint32_t *pun_red_led, uint32_t *pun_ir_led);
+MAX30102_STATUS Max30102_ReadFifo(volatile uint32_t *pun_red_led, volatile uint32_t *pun_ir_led);
 MAX30102_STATUS Max30102_WriteReg(uint8_t uch_addr, uint8_t uch_data);
 MAX30102_STATUS Max30102_ReadReg(uint8_t uch_addr, uint8_t *puch_data);
 //
@@ -188,7 +223,9 @@ MAX30102_STATUS Max30102_ReadInterruptStatus(uint8_t *Status);
 MAX30102_STATUS Max30102_SetIntAlmostFullEnabled(uint8_t Enable);
 MAX30102_STATUS Max30102_SetIntFifoDataReadyEnabled(uint8_t Enable);
 MAX30102_STATUS Max30102_SetIntAmbientLightCancelationOvfEnabled(uint8_t Enable);
+#ifdef MAX30102_USE_INTERNAL_TEMPERATURE
 MAX30102_STATUS Max30102_SetIntInternalTemperatureReadyEnabled(uint8_t Enable);
+#endif
 void Max30102_InterruptCallback(void);
 //
 //	FIFO Configuration
@@ -216,5 +253,11 @@ MAX30102_STATUS Max30102_SpO2LedPulseWidth(uint8_t Value);
 //
 MAX30102_STATUS Max30102_Led1PulseAmplitude(uint8_t Value);
 MAX30102_STATUS Max30102_Led2PulseAmplitude(uint8_t Value);
+//
+//	Usage functions
+//
+void Max30102_Task(void);
+int32_t Max30102_GetHeartRate(void);
+int32_t Max30102_GetSpO2Value(void);
 
 #endif /* MAX30102_H_ */
